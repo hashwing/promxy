@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "net/http/pprof"
@@ -19,9 +21,12 @@ import (
 
 	kitlog "github.com/go-kit/kit/log"
 	"github.com/hashwing/promxy/config"
+	"github.com/hashwing/promxy/logging"
 	"github.com/hashwing/promxy/proxystorage"
+	"github.com/jessevdk/go-flags"
 	"github.com/julienschmidt/httprouter" 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/common/version"
@@ -43,8 +48,6 @@ var (
 		Name: "process_reload_time_seconds",
 		Help: "Last reload (SIGHUP) time of the process since unix epoch in seconds.",
 	})
-	reloadables = make([]proxyconfig.Reloadable, 0)
-	opts CLIOpts
 )
 
 type CLIOpts struct {
@@ -60,7 +63,6 @@ type CLIOpts struct {
 	NotificationQueueCapacity int `long:"alertmanager.notification-queue-capacity" description:"The capacity of the queue for pending alert manager notifications." default:"10000"`
 }
 
-
 func (c *CLIOpts) ToFlags() map[string]string {
 	tmp := make(map[string]string)
 	// TODO: better
@@ -69,9 +71,9 @@ func (c *CLIOpts) ToFlags() map[string]string {
 	return tmp
 }
 
+var opts CLIOpts
 
-func ReloadConfig() error {
-	rls := reloadables
+func reloadConfig(rls ...proxyconfig.Reloadable) error {
 	cfg, err := proxyconfig.ConfigFromFile(opts.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("Error loading cfg: %v", err)
@@ -92,15 +94,27 @@ func ReloadConfig() error {
 	return nil
 }
 
-// HTTPMiddle http middle as auth etc 
-type HTTPMiddle func(w http.ResponseWriter, r *http.Request)(*http.Request,bool)
-
-func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*httprouter.Router,error) {
-	 opts = cliOpts
+func Run() {
 	// Wait for reload or termination signals. Start the handler for SIGHUP as
 	// early as possible, but ignore it until we are ready to handle reloading
 	// our config.
+	sigs := make(chan os.Signal)
+	defer close(sigs)
+	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+
 	prometheus.MustRegister(reloadTime)
+
+	reloadables := make([]proxyconfig.Reloadable, 0)
+
+	parser := flags.NewParser(&opts, flags.Default)
+	if _, err := parser.Parse(); err != nil {
+		// If the error was from the parser, then we can simply return
+		// as Parse() prints the error already
+		if _, ok := err.(*flags.Error); ok {
+			os.Exit(1)
+		}
+		logrus.Fatalf("Error parsing flags: %v", err)
+	}
 
 	// Use log level
 	level := logrus.InfoLevel
@@ -118,7 +132,7 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 	case "debug":
 		level = logrus.DebugLevel
 	default:
-		return nil,fmt.Errorf("Unknown log level: %s", opts.LogLevel)
+		logrus.Fatalf("Unknown log level: %s", opts.LogLevel)
 	}
 	logrus.SetLevel(level)
 
@@ -128,6 +142,10 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 	}
 	logrus.SetFormatter(formatter)
 
+	// Create base context for this daemon
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Reload ready -- channel to close once we are ready to start reloaders
 	reloadReady := make(chan struct{}, 0)
 
@@ -136,7 +154,7 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 
 	ps, err := proxystorage.NewProxyStorage()
 	if err != nil {
-		return nil,err
+		logrus.Fatalf("Error creating proxy: %v", err)
 	}
 	reloadables = append(reloadables, ps)
 	proxyStorage = ps
@@ -147,7 +165,7 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 	// TODO: rename
 	externalUrl, err := computeExternalURL(opts.ExternalURL, opts.BindAddr)
 	if err != nil {
-		return nil,err
+		logrus.Fatalf("Unable to parse external URL %s", "tmp")
 	}
 
 	// Alert notifier
@@ -168,7 +186,7 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 
 	discoveryManagerNotify := discovery.NewManager(ctx, kitlog.With(logger, "component", "discovery manager notify"))
 	reloadables = append(reloadables,
-		proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{func(cfg *config.Config) error { 
+		proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{func(cfg *config.Config) error {
 			c := make(map[string]sd_config.ServiceDiscoveryConfig)
 			for _, v := range cfg.AlertingConfig.AlertmanagerConfigs {
 				// AlertmanagerConfigs doesn't hold an unique identifier so we use the config hash as the identifier.
@@ -199,7 +217,7 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 		Context:     ctx,         // base context for all background tasks
 		ExternalURL: externalUrl, // URL listed as URL for "who fired this alert"
 		QueryFunc:   rules.EngineQueryFunc(engine, proxyStorage),
-		NotifyFunc:  sendAlerts(notifierManager, externalUrl.String(),nf), 
+		NotifyFunc:  sendAlerts(notifierManager, externalUrl.String()),
 		Appendable:  proxyStorage,
 		Logger:      logger,
 	})
@@ -234,7 +252,6 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 		Flags:       opts.ToFlags(),
 		RoutePrefix: "/", // TODO: options for this?
 		ExternalURL: externalUrl,
-		EnableLifecycle: true,
 		// TODO: use these?
 		/*
 			ListenAddress        string
@@ -267,20 +284,19 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 
 	// Create our router
 	r := httprouter.New()
-	
 
 	// TODO: configurable metrics path
 	r.HandlerFunc("GET", "/metrics", prometheus.Handler().ServeHTTP)
 
 	r.NotFound = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r,res := middle(w,r)
-		if !res{
-			return
-		} 
 		// Have our fallback rules
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-				apiRouter.ServeHTTP(w, r)
-			
+			commonLabels:=map[string]string{
+				"sg": "test1",
+			}
+			valueCtx :=context.WithValue(r.Context(),"common_labels",commonLabels)
+			r=r.WithContext(valueCtx)
+			apiRouter.ServeHTTP(w, r)
 		} else if strings.HasPrefix(r.URL.Path, "/debug") {
 			http.DefaultServeMux.ServeHTTP(w, r)
 		} else {
@@ -289,70 +305,74 @@ func Run(ctx context.Context,cliOpts CLIOpts, nf NotifyFunc,middle HTTPMiddle)(*
 		}
 	})
 
-	if err := ReloadConfig(); err != nil {
-		return r,fmt.Errorf("Error loading config: %s", err)
-		//logrus.Fatalf("Error loading config: %s", err)
+	if err := reloadConfig(reloadables...); err != nil {
+		logrus.Fatalf("Error loading config: %s", err)
 	}
 
 	close(reloadReady)
 
 	// Set up access logger
-	// loggedRouter := logging.NewApacheLoggingHandler(r, logging.LogToWriter(os.Stdout))
-	// srv := &http.Server{
-	// 	Addr:    opts.BindAddr,
-	// 	Handler: loggedRouter,
-	// }
+	loggedRouter := logging.NewApacheLoggingHandler(r, logging.LogToWriter(os.Stdout))
+	srv := &http.Server{
+		Addr:    opts.BindAddr,
+		Handler: loggedRouter,
+	}
 
-	// go func() {
-	// 	logrus.Infof("promxy starting")
-	// 	if err := srv.ListenAndServe(); err != nil {
-	// 		log.Fatalf("Error listening: %v", err)
-	// 	}
-	// }()
-	  return r,nil
+	go func() {
+		logrus.Infof("promxy starting")
+		if err := srv.ListenAndServe(); err != nil {
+			log.Fatalf("Error listening: %v", err)
+		}
+	}()
+
+	// wait for signals etc.
+	for {
+		select {
+		case sig := <-sigs:
+			switch sig {
+			case syscall.SIGHUP:
+				log.Infof("Reloading config")
+				if err := reloadConfig(reloadables...); err != nil {
+					log.Errorf("Error reloading config: %s", err)
+				}
+			case syscall.SIGTERM, syscall.SIGINT:
+				log.Infof("promxy exiting")
+				cancel()
+				srv.Shutdown(ctx)
+				return
+			default:
+				log.Errorf("Uncaught signal: %v", sig)
+			}
+
+		}
+	}
 }
-
-
-//  Alert implements notifier.Alert
-type Alert struct {
-	notifier.Alert
-}
-// NotifyFunc implements rules.NotifyFunc
-type NotifyFunc func(alerts ...*Alert) error
 
 // sendAlerts implements the rules.NotifyFunc for a Notifier.
 // It filters any non-firing alerts from the input.
-func sendAlerts(n *notifier.Manager,externalURL string, nf NotifyFunc) rules.NotifyFunc {
+func sendAlerts(n *notifier.Manager, externalURL string) rules.NotifyFunc {
 	return func(ctx context.Context, expr string, alerts ...*rules.Alert) error {
-		var res []*Alert
-		var nres []*notifier.Alert
+		var res []*notifier.Alert
 
 		for _, alert := range alerts {
 			// Only send actually firing alerts.
 			if alert.State == rules.StatePending {
 				continue
 			}
-			na := &notifier.Alert{
+			a := &notifier.Alert{
 				StartsAt:     alert.FiredAt,
 				Labels:       alert.Labels,
 				Annotations:  alert.Annotations,
 				GeneratorURL: externalURL + strutil.TableLinkForExpression(expr),
 			}
-
-
 			if !alert.ResolvedAt.IsZero() {
-				na.EndsAt = alert.ResolvedAt
+				a.EndsAt = alert.ResolvedAt
 			}
-			a := &Alert{
-				*na,
-			}
-			nres = append(nres,na)
 			res = append(res, a)
 		}
 
 		if len(alerts) > 0 {
-			n.Send(nres...)
-			return nf(res...)
+			n.Send(res...)
 		}
 		return nil
 	}
