@@ -25,7 +25,7 @@ type ApacheLogRecord struct {
 }
 
 func (r *ApacheLogRecord) Log(out io.Writer) {
-	timeFormatted := r.Time.Format("02/Jan/2006 03:04:05")
+	timeFormatted := r.Time.Format("02/Jan/2006 15:04:05")
 	requestLine := fmt.Sprintf("%s %s %s", r.Method, r.URI, r.Protocol)
 	fmt.Fprintf(out, ApacheFormatPattern, r.IP, timeFormatted, requestLine, r.Status, r.ResponseBytes,
 		r.ElapsedTime.Seconds())
@@ -65,11 +65,8 @@ func NewApacheLoggingHandler(handler http.Handler, logHandlers ...LogRecordHandl
 func (h *ApacheLoggingHandler) runHandler(rw http.ResponseWriter, r *http.Request) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			var ok bool
-			err, ok = rec.(error)
-			if !ok {
-				err = errors.Wrap(fmt.Errorf(string(debug.Stack())), "Error running handler")
-			}
+			// Just return a stack trace always
+			err = errors.Wrap(fmt.Errorf(string(debug.Stack())), "Error running handler")
 		}
 	}()
 	h.handler.ServeHTTP(rw, r)
