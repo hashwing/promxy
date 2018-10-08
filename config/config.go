@@ -3,6 +3,7 @@ package proxyconfig
 import (
 	"fmt"
 	"io/ioutil"
+	"time"
 
 	"github.com/hashwing/promxy/servergroup"
 	"github.com/prometheus/prometheus/config"
@@ -42,5 +43,11 @@ type Config struct {
 // PromxyConfig is the configuration for Promxy itself
 type PromxyConfig struct {
 	// Config for each of the server groups promxy is configured to aggregate
-	ServerGroups []*servergroup.Config `yaml:"server_groups"`
+	ServerGroups              []*servergroup.Config `yaml:"server_groups"`
+	BindAddr                  string                `yaml:"bind_addr"`
+	LogLevel                  string                `yaml:"log_level"`
+	ExternalURL               string                `yaml:"external_url"`
+	QueryTimeout              time.Duration         `yaml:"query_timeout"`
+	QueryMaxConcurrency       int                   `yaml:"query_max_concurency"`
+	NotificationQueueCapacity int                   `yaml:"notification_queue"`
 }
