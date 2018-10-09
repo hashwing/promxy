@@ -112,7 +112,7 @@ func Run(ctx context.Context, cfg *proxyconfig.Config, nf NotifyFunc, middle HTT
 	reloadables = append(reloadables, ps)
 	proxyStorage = ps
 
-	engine := promql.NewEngine(nil, prometheus.DefaultRegisterer, cfg.PromxyConfig.QueryMaxConcurrency, cfg.PromxyConfig.QueryTimeout)
+	engine := promql.NewEngine(nil, prometheus.DefaultRegisterer, cfg.PromxyConfig.QueryMaxConcurrency, time.Duration(int64(cfg.PromxyConfig.QueryTimeout)))
 	engine.NodeReplacer = ps.NodeReplacer
 
 	// TODO: rename
@@ -281,19 +281,13 @@ func Run(ctx context.Context, cfg *proxyconfig.Config, nf NotifyFunc, middle HTT
 	return r, nil
 }
 
-// Alert implements notifier.Alert
-type Alert struct {
-	notifier.Alert
-}
-
 // NotifyFunc implements rules.NotifyFunc
-type NotifyFunc func(alerts ...*Alert) error
+type NotifyFunc func(as ...*notifier.Alert) error
 
 // sendAlerts implements the rules.NotifyFunc for a Notifier.
 // It filters any non-firing alerts from the input.
 func sendAlerts(n *notifier.Manager, externalURL string, nf NotifyFunc) rules.NotifyFunc {
 	return func(ctx context.Context, expr string, alerts ...*rules.Alert) error {
-		var res []*Alert
 		var nres []*notifier.Alert
 
 		for _, alert := range alerts {
@@ -311,16 +305,12 @@ func sendAlerts(n *notifier.Manager, externalURL string, nf NotifyFunc) rules.No
 			if !alert.ResolvedAt.IsZero() {
 				na.EndsAt = alert.ResolvedAt
 			}
-			a := &Alert{
-				*na,
-			}
 			nres = append(nres, na)
-			res = append(res, a)
 		}
 
 		if len(alerts) > 0 {
 			n.Send(nres...)
-			return nf(res...)
+			return nf(nres...)
 		}
 		return nil
 	}

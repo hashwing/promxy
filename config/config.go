@@ -3,7 +3,6 @@ package proxyconfig
 import (
 	"fmt"
 	"io/ioutil"
-	"time"
 
 	"github.com/hashwing/promxy/servergroup"
 	"github.com/prometheus/prometheus/config"
@@ -47,7 +46,7 @@ type PromxyConfig struct {
 	BindAddr                  string                `yaml:"bind_addr"`
 	LogLevel                  string                `yaml:"log_level"`
 	ExternalURL               string                `yaml:"external_url"`
-	QueryTimeout              time.Duration         `yaml:"query_timeout"`
+	QueryTimeout              int                   `yaml:"query_timeout"`
 	QueryMaxConcurrency       int                   `yaml:"query_max_concurency"`
 	NotificationQueueCapacity int                   `yaml:"notification_queue"`
 }
