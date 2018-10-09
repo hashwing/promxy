@@ -112,7 +112,7 @@ func Run(ctx context.Context, cfg *proxyconfig.Config, nf NotifyFunc, middle HTT
 	reloadables = append(reloadables, ps)
 	proxyStorage = ps
 
-	engine := promql.NewEngine(nil, prometheus.DefaultRegisterer, cfg.PromxyConfig.QueryMaxConcurrency, time.Duration(int64(cfg.PromxyConfig.QueryTimeout)))
+	engine := promql.NewEngine(nil, prometheus.DefaultRegisterer, cfg.PromxyConfig.QueryMaxConcurrency, time.Duration(int64(cfg.PromxyConfig.QueryTimeout))*time.Second)
 	engine.NodeReplacer = ps.NodeReplacer
 
 	// TODO: rename
