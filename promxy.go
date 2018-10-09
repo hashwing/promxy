@@ -281,15 +281,20 @@ func Run(ctx context.Context, cfg *proxyconfig.Config, nf NotifyFunc, middle HTT
 	return r, nil
 }
 
+// Alert ...
+type Alert struct {
+	notifier.Alert
+}
+
 // NotifyFunc implements rules.NotifyFunc
-type NotifyFunc func(as ...*notifier.Alert) error
+type NotifyFunc func(as ...*Alert) error
 
 // sendAlerts implements the rules.NotifyFunc for a Notifier.
 // It filters any non-firing alerts from the input.
 func sendAlerts(n *notifier.Manager, externalURL string, nf NotifyFunc) rules.NotifyFunc {
 	return func(ctx context.Context, expr string, alerts ...*rules.Alert) error {
 		var nres []*notifier.Alert
-
+		var res []*Alert
 		for _, alert := range alerts {
 			// Only send actually firing alerts.
 			if alert.State == rules.StatePending {
@@ -305,12 +310,16 @@ func sendAlerts(n *notifier.Manager, externalURL string, nf NotifyFunc) rules.No
 			if !alert.ResolvedAt.IsZero() {
 				na.EndsAt = alert.ResolvedAt
 			}
+			a := &Alert{
+				*na,
+			}
+			res = append(res, a)
 			nres = append(nres, na)
 		}
 
 		if len(alerts) > 0 {
 			n.Send(nres...)
-			return nf(nres...)
+			return nf(res...)
 		}
 		return nil
 	}
